@@ -4,6 +4,9 @@ import type { Update } from "telegraf/typings/core/types/typegram";
 import type { VisaAppointment } from "../types";
 import { config } from "../config/environment";
 
+// Türkiye saat dilimini ayarla
+process.env.TZ = 'Europe/Istanbul';
+
 interface TelegramError {
   response?: {
     parameters?: {
