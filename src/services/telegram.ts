@@ -18,189 +18,133 @@ interface TelegramError {
  */
 class TelegramService {
   private bot: Telegraf;
-  private messageCount = 0;
-  private lastReset = Date.now();
-  private resetInterval?: ReturnType<typeof setInterval>;
+  private lastMessageSentAt: number = 0;
+  private messageQueue: VisaAppointment[] = [];
+  private isProcessingQueue: boolean = false;
 
   constructor() {
     this.bot = new Telegraf(config.telegram.botToken);
-    this.setupErrorHandler();
-    this.startRateLimitReset();
   }
 
-  private escapeMarkdown(text: string): string {
-    return text.replace(/[_*[\\]()~`>#+=|{}.!]/g, "\\\\$&");
+  // HTML için özel karakterleri escape eder
+  private escapeHtml(text: string): string {
+    if (!text) return '';
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
-  /**
-   * Bot hata yakalayıcısını ayarlar
-   * Bot çalışırken oluşabilecek hataları yakalar ve loglar
-   */
-  private setupErrorHandler(): void {
-    this.bot.catch((err: unknown, ctx: Context<Update>) => {
-      console.error("Telegram bot hatası:", {
-        error: err,
-        updateType: ctx.updateType,
-        chatId: ctx.chat?.id,
-      });
-    });
-  }
-
-  /**
-   * Rate limit sayacını sıfırlar
-   * Her dakika başında çalışır
-   */
-  private startRateLimitReset(): void {
-    // Önceki interval'i temizle
-    if (this.resetInterval) {
-      clearInterval(this.resetInterval);
-    }
-
-    this.resetInterval = setInterval(() => {
-      if (this.messageCount > 0) {
-        console.log(
-          `Rate limit sayacı sıfırlandı. Önceki mesaj sayısı: ${this.messageCount}`
-        );
-      }
-      this.messageCount = 0;
-      this.lastReset = Date.now();
-    }, 60000); // Her dakika
-  }
-
-  /**
-   * Rate limit kontrolü yapar ve gerekirse bekler
-   */
-  private async handleRateLimit(): Promise<void> {
-    if (this.messageCount >= config.telegram.rateLimit) {
-      const timeToWait = 60000 - (Date.now() - this.lastReset);
-      if (timeToWait > 0) {
-        console.log(
-          `Rate limit aşıldı. ${Math.ceil(
-            timeToWait / 1000
-          )} saniye bekleniyor...`
-        );
-        await new Promise((resolve) => setTimeout(resolve, timeToWait));
-        this.messageCount = 0;
-        this.lastReset = Date.now();
-      }
-    }
-  }
-
-  /**
-   * Randevu bilgilerini okunabilir bir mesaj formatına dönüştürür
-   */
-  formatMessage(appointment: VisaAppointment): string {
-    const lastChecked = new Date(appointment.last_checked_at);
-
-    const formatDate = (date: Date | string) => {
-      if (typeof date === "string") {
-        date = new Date(date);
-      }
-      return date.toLocaleString("tr-TR", {
-        timeZone: "Europe/Istanbul",
-        dateStyle: "medium",
-        timeStyle: "medium",
-      });
-    };
-
-    const formatAvailableDate = (dateStr?: string): string => {
-      if (!dateStr) return "Bilgi Yok";
-      return this.escapeMarkdown(dateStr);
-    };
-
+  // Randevu bilgilerini Telegram mesajı olarak biçimlendirir (HTML formatında)
+  private formatMessage(appointment: VisaAppointment): string {
     const statusEmoji =
-      {
-        open: "✅",
-        waitlist_open: "⏳",
-        closed: "❌",
-        waitlist_closed: "🔒",
-      }[appointment.status] || "❓";
+      appointment.status === 'open'
+        ? '✅'
+        : appointment.status === 'waitlist_open'
+        ? '⏳'
+        : '❓';
+    
+    const statusText = 
+      appointment.status === 'open'
+        ? 'Açık'
+        : appointment.status === 'waitlist_open'
+        ? 'Bekleme Listesi Açık'
+        : appointment.status;
 
-    return [
-      `*${statusEmoji} YENİ RANDEVU DURUMU\\\\! *
-`,
-      `🏢 *Merkez:* ${this.escapeMarkdown(
-        appointment.center.replace(/\\s*-\\s*/g, "")
-      )}`,
-      `🌍 *Ülke/Misyon:* ${this.escapeMarkdown(
-        appointment.country_code.toUpperCase().replace(/\\s*-\\s*/g, "")
-      )} \\\\-\\\*> ${this.escapeMarkdown(
-        appointment.mission_code.toUpperCase().replace(/\\s*-\\s*/g, "")
-      )}`,
-      `🛂 *Kategori:* ${this.escapeMarkdown(
-        appointment.visa_category.replace(/\\s*-\\s*/g, "")
-      )}`,
-      `📄 *Tip:* ${this.escapeMarkdown(
-        appointment.visa_type.replace(/\\s*-\\s*/g, "")
-      )}`,
-      `🚦 *Durum:* ${statusEmoji} ${this.escapeMarkdown(appointment.status)}`,
-      `🗓️ *Son Müsait Tarih:* ${formatAvailableDate(
-        appointment.last_available_date
-      )}`,
-      `\\n📊 *Takip Sayısı:* ${appointment.tracking_count}`,
-      `\\n⏰ *Son Kontrol:* ${this.escapeMarkdown(formatDate(lastChecked))}`,
-    ].join("\\n");
+    const lastCheckedDate = new Date(appointment.last_checked_at).toLocaleString('tr-TR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    const message = `<b>${statusEmoji} YENİ RANDEVU DURUMU</b>
+
+🏢 <b>Merkez:</b> ${this.escapeHtml(appointment.center)}
+🌍 <b>Ülke/Misyon:</b> ${this.escapeHtml(appointment.country_code.toUpperCase())} → ${this.escapeHtml(appointment.mission_code.toUpperCase())}
+🛂 <b>Kategori:</b> ${this.escapeHtml(appointment.visa_category || 'Belirtilmemiş')}
+📄 <b>Tip:</b> ${this.escapeHtml(appointment.visa_type || 'Belirtilmemiş')}
+🚦 <b>Durum:</b> ${statusEmoji} ${this.escapeHtml(statusText)}
+🗓️ <b>Son Müsait Tarih:</b> ${this.escapeHtml(appointment.last_available_date || 'Belirtilmemiş')}
+📊 <b>Takip Sayısı:</b> ${appointment.tracking_count || 0}
+⏰ <b>Son Kontrol:</b> ${this.escapeHtml(lastCheckedDate)}
+
+<i>Bu randevu otomatik olarak tespit edilmiştir.</i>`;
+
+    return message;
   }
 
-  /**
-   * Yeni randevu bilgisini Telegram kanalına gönderir
-   * @returns Mesaj başarıyla gönderildiyse true, hata oluştuysa false döner
-   */
+  // Telegram'a bildirim gönderir
   async sendNotification(appointment: VisaAppointment): Promise<boolean> {
-    try {
-      await this.handleRateLimit();
+    this.messageQueue.push(appointment);
+    if (!this.isProcessingQueue) {
+      void this.processQueue();
+    }
+    return true; // Kuyruğa eklendiğini belirtmek için hemen true döner
+  }
 
-      await this.bot.telegram.sendMessage(
-        config.telegram.channelId,
-        this.formatMessage(appointment),
-        {
-          parse_mode: "MarkdownV2",
-          link_preview_options: {
-            is_disabled: true,
-          },
-        }
-      );
+  private async processQueue(): Promise<void> {
+    this.isProcessingQueue = true;
+    while (this.messageQueue.length > 0) {
+      const appointment = this.messageQueue.shift();
+      if (!appointment) continue;
 
-      this.messageCount++;
-      return true;
-    } catch (error) {
-      if (this.isTelegramError(error)) {
-        const retryAfter = error.response?.parameters?.retry_after;
-        if (retryAfter) {
-          const waitTime = retryAfter * 1000;
+      const now = Date.now();
+      const timeSinceLastMessage = now - this.lastMessageSentAt;
+      const requiredDelay = (60 / config.telegram.rateLimit) * 1000; // ms cinsinden
+
+      if (timeSinceLastMessage < requiredDelay) {
+        const delay = requiredDelay - timeSinceLastMessage;
+        if (config.app.debug) {
           console.log(
-            `Telegram rate limit aşıldı. ${retryAfter} saniye bekleniyor...`
+            `⏳ Rate limit nedeniyle ${delay.toFixed(0)}ms bekleniyor...`
           );
-          await new Promise((resolve) => setTimeout(resolve, waitTime));
-          return this.sendNotification(appointment);
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+
+      const message = this.formatMessage(appointment);
+      try {
+        if (config.app.debug) {
+          console.log(`📤 Yeni randevu bildirimi gönderiliyor (ID: ${appointment.id})...`);
+        }
+
+        await this.bot.telegram.sendMessage(config.telegram.channelId, message, {
+          parse_mode: 'HTML', // MarkdownV2 yerine HTML kullanıyoruz
+        });
+
+        if (config.app.debug) {
+          console.log(`✅ Bildirim başarıyla gönderildi: ID ${appointment.id}`);
+        }
+        this.lastMessageSentAt = Date.now();
+      } catch (error) {
+        console.error(
+          `❌ Telegram bildirim hatası (ID: ${appointment.id}):`,
+          error instanceof Error ? error.message : error
+        );
+        
+        // Eğer parsing hatası değilse tekrar dene
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (!errorMessage.includes("can't parse entities") && !errorMessage.includes("Bad Request")) {
+          // Hata durumunda mesajı kuyruğun başına geri ekle ve tekrar dene
+          this.messageQueue.unshift(appointment);
+          if (config.app.debug) {
+            console.log(`🔄 Tekrar deneme için mesaj kuyruğa geri eklendi.`);
+          }
+          // Hata durumunda kısa bir bekleme ekleyebiliriz
+          await new Promise((resolve) => setTimeout(resolve, config.telegram.retryAfter));
+          break; // Kuyruğu durdur ve bir sonraki döngüde tekrar dene
+        } else {
+          // Parsing hatası ise mesajı logla ve atla
+          console.error(`⚠️ Mesaj formatı hatası, atlanıyor: ID ${appointment.id}`);
         }
       }
-      console.error("Telegram mesajı gönderilirken hata oluştu:", error);
-      return false;
     }
-  }
-
-  /**
-   * Hata nesnesinin Telegram hatası olup olmadığını kontrol eder
-   */
-  private isTelegramError(error: unknown): error is TelegramError {
-    return (
-      error !== null &&
-      typeof error === "object" &&
-      "response" in error &&
-      error.response !== null &&
-      typeof error.response === "object" &&
-      "parameters" in error.response
-    );
-  }
-
-  /**
-   * Servis kapatılırken interval'i temizle
-   */
-  cleanup(): void {
-    if (this.resetInterval) {
-      clearInterval(this.resetInterval);
-    }
+    this.isProcessingQueue = false;
   }
 }
 
